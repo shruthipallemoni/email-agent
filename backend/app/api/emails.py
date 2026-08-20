@@ -16,11 +16,13 @@ from sqlalchemy.orm import Session
 from app.api.auth import get_current_user
 from app.core.database import get_db
 from app.models.user import User
+from app.schemas.agent import AgentRunResponse
 from app.schemas.analysis import EmailAnalysisResponse
 from app.schemas.email import EmailDetail, EmailListResponse, ThreadResponse
 from app.services import gmail_service
 from app.services.email_analysis_service import analyze_email
 from app.services.llm.factory import get_llm_provider
+from app.agent.graph import run_email_agent
 
 router = APIRouter()
 
@@ -81,4 +83,40 @@ async def analyze_email_route(
         subject=email["subject"],
         from_=email["from_"],
         analysis=analysis,
+    )
+
+
+@router.post("/{message_id}/run-agent", response_model=AgentRunResponse)
+async def run_agent_route(
+    message_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Runs the full LangGraph agent workflow on one email: analyze it, decide
+    what (if anything) needs to happen, and record each step taken.
+
+    Right now most of the workflow after "analyze" is placeholder logic -
+    see app/agent/nodes.py for exactly which steps are real vs. stubbed,
+    and which future block implements each one for real.
+    """
+    email = await gmail_service.get_email_detail(db, user, message_id)
+    llm = get_llm_provider()
+
+    final_state = await run_email_agent(
+        llm,
+        message_id=email["id"],
+        subject=email["subject"],
+        sender=email["from_"],
+        body_text=email["body_text"],
+    )
+
+    return AgentRunResponse(
+        message_id=final_state["message_id"],
+        subject=final_state["subject"],
+        sender=final_state["sender"],
+        analysis=final_state.get("analysis"),
+        action_decision=final_state.get("action_decision"),
+        human_approval_required=final_state.get("human_approval_required"),
+        log=final_state.get("log", []),
     )
