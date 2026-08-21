@@ -35,7 +35,7 @@ def build_email_agent_graph(llm: LLMProvider):
     graph.add_node("analyze_email", nodes.make_analyze_email_node(llm))
     graph.add_node("determine_action", nodes.determine_action_node)
     graph.add_node("retrieve_context", nodes.retrieve_context_node)
-    graph.add_node("generate_reply", nodes.generate_reply_node)
+    graph.add_node("generate_reply", nodes.make_generate_reply_node(llm))
     graph.add_node("validate_reply", nodes.validate_reply_node)
     graph.add_node("determine_approval", nodes.determine_approval_node)
     graph.add_node("human_approval", nodes.human_approval_node)

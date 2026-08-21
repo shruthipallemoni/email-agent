@@ -19,8 +19,10 @@ from app.models.user import User
 from app.schemas.agent import AgentRunResponse
 from app.schemas.analysis import EmailAnalysisResponse
 from app.schemas.email import EmailDetail, EmailListResponse, ThreadResponse
+from app.schemas.reply import ReplyDraftResponse
 from app.services import gmail_service
 from app.services.email_analysis_service import analyze_email
+from app.services.reply_generation_service import generate_reply
 from app.services.llm.factory import get_llm_provider
 from app.agent.graph import run_email_agent
 
@@ -117,6 +119,40 @@ async def run_agent_route(
         sender=final_state["sender"],
         analysis=final_state.get("analysis"),
         action_decision=final_state.get("action_decision"),
+        reply_draft=final_state.get("reply_draft"),
         human_approval_required=final_state.get("human_approval_required"),
         log=final_state.get("log", []),
+    )
+
+
+@router.post("/{message_id}/generate-reply", response_model=ReplyDraftResponse)
+async def generate_reply_route(
+    message_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Analyzes an email and drafts a reply, in one call - useful for testing
+    reply generation directly without running the full agent pipeline.
+    """
+    email = await gmail_service.get_email_detail(db, user, message_id)
+    llm = get_llm_provider()
+
+    analysis = await analyze_email(
+        llm, subject=email["subject"], sender=email["from_"], body_text=email["body_text"]
+    )
+    draft = await generate_reply(
+        llm,
+        subject=email["subject"],
+        sender=email["from_"],
+        body_text=email["body_text"],
+        analysis=analysis,
+    )
+
+    return ReplyDraftResponse(
+        email_id=email["id"],
+        subject=email["subject"],
+        from_=email["from_"],
+        analysis=analysis,
+        draft=draft,
     )

@@ -3,10 +3,9 @@ Individual steps ("nodes") the LangGraph agent can take while processing an
 email. Each node is a small function: it reads the current state, does one
 job, and returns just the piece of state it changed.
 
-Several of these are PLACEHOLDERS for now (clearly marked below) - they
+Some of these are still PLACEHOLDERS for now (clearly marked below) - they
 exist so the overall agent workflow is wired up correctly from the start.
-Later blocks replace each placeholder with real logic:
-- Block 7  will implement generate_reply_node for real
+Later blocks replace each remaining placeholder with real logic:
 - Block 8  will implement validate_reply_node for real
 - Block 9  will implement human_approval_node for real
 - Block 10 will implement execute_action_node for real
@@ -19,7 +18,9 @@ skeleton first.
 
 from app.agent.state import EmailAgentState
 from app.schemas.analysis import EmailAnalysis
+from app.schemas.reply import ReplyDraft
 from app.services.email_analysis_service import analyze_email
+from app.services.reply_generation_service import generate_reply
 from app.services.llm.base import LLMProvider
 
 
@@ -68,12 +69,28 @@ def retrieve_context_node(state: EmailAgentState) -> dict:
     return {"log": ["Retrieve context: skipped (not implemented until Block 13)"]}
 
 
-def generate_reply_node(state: EmailAgentState) -> dict:
-    """PLACEHOLDER - real AI reply drafting comes in Block 7."""
-    return {
-        "reply_draft": None,
-        "log": ["Generate reply: skipped (not implemented until Block 7)"],
-    }
+def make_generate_reply_node(llm: LLMProvider):
+    """
+    Drafts a reply using the email content plus the analysis from the
+    analyze_email step earlier in the graph. Same closure pattern as
+    make_analyze_email_node - it's how this node gets access to `llm`.
+    """
+
+    async def generate_reply_node(state: EmailAgentState) -> dict:
+        analysis = state["analysis"]
+        draft: ReplyDraft = await generate_reply(
+            llm,
+            subject=state["subject"],
+            sender=state["sender"],
+            body_text=state["body_text"],
+            analysis=analysis,
+        )
+        return {
+            "reply_draft": draft,
+            "log": [f"Generate reply: drafted subject='{draft.subject}'"],
+        }
+
+    return generate_reply_node
 
 
 def validate_reply_node(state: EmailAgentState) -> dict:

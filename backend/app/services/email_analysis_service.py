@@ -22,6 +22,7 @@ from fastapi import HTTPException
 
 from app.schemas.analysis import EmailAnalysis
 from app.services.llm.base import LLMProvider
+from app.services.llm.json_utils import strip_code_fences
 
 SYSTEM_PROMPT = """You are an email classification assistant. Your only job \
 is to analyze the email provided below and output a structured JSON \
@@ -71,23 +72,10 @@ async def analyze_email(
     raw_response = await llm.complete(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
 
     try:
-        data = json.loads(_strip_code_fences(raw_response))
+        data = json.loads(strip_code_fences(raw_response))
         return EmailAnalysis(**data)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=502,
             detail=f"AI returned an unexpected response and could not be parsed: {exc}",
         )
-
-
-def _strip_code_fences(text: str) -> str:
-    """
-    Some models wrap JSON in ```json ... ``` even when asked not to.
-    This removes that wrapping so json.loads() doesn't fail.
-    """
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text
-        if text.endswith("```"):
-            text = text.rsplit("```", 1)[0]
-    return text.strip()

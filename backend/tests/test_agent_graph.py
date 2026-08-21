@@ -16,11 +16,21 @@ from app.services.llm.base import LLMProvider
 
 
 class FakeLLMProvider(LLMProvider):
-    def __init__(self, canned_response: str):
-        self.canned_response = canned_response
+    """
+    A stand-in AI. Accepts either one response (reused for every call) or a
+    list of responses returned in order - the agent now makes more than one
+    LLM call per run (analyze, then generate reply), so tests that exercise
+    the full pipeline need to supply one response per call.
+    """
+
+    def __init__(self, responses):
+        self._responses = [responses] if isinstance(responses, str) else list(responses)
+        self._call_count = 0
 
     async def complete(self, system_prompt: str, user_prompt: str) -> str:
-        return self.canned_response
+        index = min(self._call_count, len(self._responses) - 1)
+        self._call_count += 1
+        return self._responses[index]
 
 
 def _analysis_json(requires_response: bool, risk_level: str = "low") -> str:
@@ -33,6 +43,16 @@ def _analysis_json(requires_response: bool, risk_level: str = "low") -> str:
             "requires_response": requires_response,
             "summary": "A test email.",
             "reasoning": "Test reasoning.",
+        }
+    )
+
+
+def _reply_json() -> str:
+    return json.dumps(
+        {
+            "subject": "Re: Can we reschedule?",
+            "body": "Sure, Friday works for me.",
+            "notes": "Assumed Friday availability based on context.",
         }
     )
 
@@ -72,7 +92,7 @@ async def test_agent_goes_through_full_pipeline_when_response_needed():
     retrieve context, generate reply, validate, determine approval, human
     approval, execute action, then store result.
     """
-    llm = FakeLLMProvider(_analysis_json(requires_response=True))
+    llm = FakeLLMProvider([_analysis_json(requires_response=True), _reply_json()])
 
     final_state = await run_email_agent(
         llm,
@@ -84,6 +104,8 @@ async def test_agent_goes_through_full_pipeline_when_response_needed():
 
     assert final_state["action_decision"] == "needs_further_processing"
     assert final_state["human_approval_required"] is True
+    assert final_state["reply_draft"].subject == "Re: Can we reschedule?"
+    assert "Friday" in final_state["reply_draft"].body
 
     log_text = " ".join(final_state["log"])
     assert "Retrieve context" in log_text
@@ -118,7 +140,7 @@ async def test_agent_log_grows_rather_than_overwrites():
     Confirms the `operator.add` annotation on the state's log field works -
     each step's log entries should ADD to the list, not replace it.
     """
-    llm = FakeLLMProvider(_analysis_json(requires_response=True))
+    llm = FakeLLMProvider([_analysis_json(requires_response=True), _reply_json()])
 
     final_state = await run_email_agent(
         llm,
