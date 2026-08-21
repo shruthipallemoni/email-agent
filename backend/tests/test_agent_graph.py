@@ -57,6 +57,17 @@ def _reply_json() -> str:
     )
 
 
+def _validation_json(passed: bool = True, severity: str = "none") -> str:
+    return json.dumps(
+        {
+            "passed": passed,
+            "issues": [],
+            "severity": severity,
+            "reasoning": "Looks good.",
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_agent_takes_shortcut_when_no_response_needed():
     """
@@ -92,7 +103,9 @@ async def test_agent_goes_through_full_pipeline_when_response_needed():
     retrieve context, generate reply, validate, determine approval, human
     approval, execute action, then store result.
     """
-    llm = FakeLLMProvider([_analysis_json(requires_response=True), _reply_json()])
+    llm = FakeLLMProvider([
+        _analysis_json(requires_response=True), _reply_json(), _validation_json(passed=True),
+    ])
 
     final_state = await run_email_agent(
         llm,
@@ -106,6 +119,8 @@ async def test_agent_goes_through_full_pipeline_when_response_needed():
     assert final_state["human_approval_required"] is True
     assert final_state["reply_draft"].subject == "Re: Can we reschedule?"
     assert "Friday" in final_state["reply_draft"].body
+    assert final_state["reply_validation"].passed is True
+    assert final_state["reply_validated"] is True
 
     log_text = " ".join(final_state["log"])
     assert "Retrieve context" in log_text
@@ -140,7 +155,9 @@ async def test_agent_log_grows_rather_than_overwrites():
     Confirms the `operator.add` annotation on the state's log field works -
     each step's log entries should ADD to the list, not replace it.
     """
-    llm = FakeLLMProvider([_analysis_json(requires_response=True), _reply_json()])
+    llm = FakeLLMProvider([
+        _analysis_json(requires_response=True), _reply_json(), _validation_json(passed=True),
+    ])
 
     final_state = await run_email_agent(
         llm,

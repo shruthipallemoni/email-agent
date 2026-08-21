@@ -6,7 +6,6 @@ job, and returns just the piece of state it changed.
 Some of these are still PLACEHOLDERS for now (clearly marked below) - they
 exist so the overall agent workflow is wired up correctly from the start.
 Later blocks replace each remaining placeholder with real logic:
-- Block 8  will implement validate_reply_node for real
 - Block 9  will implement human_approval_node for real
 - Block 10 will implement execute_action_node for real
 - Block 13 will implement retrieve_context_node for real (RAG)
@@ -19,8 +18,10 @@ skeleton first.
 from app.agent.state import EmailAgentState
 from app.schemas.analysis import EmailAnalysis
 from app.schemas.reply import ReplyDraft
+from app.schemas.validation import ReplyValidation
 from app.services.email_analysis_service import analyze_email
 from app.services.reply_generation_service import generate_reply
+from app.services.reply_validation_service import validate_reply
 from app.services.llm.base import LLMProvider
 
 
@@ -93,12 +94,33 @@ def make_generate_reply_node(llm: LLMProvider):
     return generate_reply_node
 
 
-def validate_reply_node(state: EmailAgentState) -> dict:
-    """PLACEHOLDER - real validation of AI-drafted replies comes in Block 8."""
-    return {
-        "reply_validated": False,
-        "log": ["Validate reply: skipped (not implemented until Block 8)"],
-    }
+def make_validate_reply_node(llm: LLMProvider):
+    """
+    Reviews the draft from generate_reply against the original email,
+    checking for fabricated commitments, risky content, or leftover
+    placeholder text. Same closure pattern as the other AI-backed nodes.
+    """
+
+    async def validate_reply_node(state: EmailAgentState) -> dict:
+        validation: ReplyValidation = await validate_reply(
+            llm,
+            subject=state["subject"],
+            sender=state["sender"],
+            body_text=state["body_text"],
+            analysis=state["analysis"],
+            draft=state["reply_draft"],
+        )
+        log_entry = f"Validate reply: passed={validation.passed}, severity={validation.severity}"
+        if validation.issues:
+            log_entry += f", issues={validation.issues}"
+
+        return {
+            "reply_validated": validation.passed,
+            "reply_validation": validation,
+            "log": [log_entry],
+        }
+
+    return validate_reply_node
 
 
 def determine_approval_node(state: EmailAgentState) -> dict:
