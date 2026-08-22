@@ -3,11 +3,8 @@ Individual steps ("nodes") the LangGraph agent can take while processing an
 email. Each node is a small function: it reads the current state, does one
 job, and returns just the piece of state it changed.
 
-Some of these are still PLACEHOLDERS for now (clearly marked below) - they
-exist so the overall agent workflow is wired up correctly from the start.
-Later blocks replace each remaining placeholder with real logic:
-- Block 9  will implement human_approval_node for real
-- Block 10 will implement execute_action_node for real
+One placeholder remains for now:
+- Block 10 will implement execute_action_node's actual Gmail-sending call
 - Block 13 will implement retrieve_context_node for real (RAG)
 
 Nothing about the graph's shape needs to change when that happens - only
@@ -137,18 +134,32 @@ def determine_approval_node(state: EmailAgentState) -> dict:
 
 
 def human_approval_node(state: EmailAgentState) -> dict:
-    """PLACEHOLDER - real interactive approval (pause-and-wait) comes in Block 9."""
-    return {
-        "human_approved": None,
-        "log": ["Human approval: awaiting implementation (Block 9) - no action taken"],
-    }
+    """
+    REAL LOGIC: by the time this node actually runs, the graph has already
+    PAUSED (LangGraph's "interrupt_before" feature - see graph.py) and a
+    human has approved or rejected the draft through the API. This node
+    doesn't do the approving itself - it just records the decision that
+    was made, which was written into the state before the graph resumed.
+    """
+    approved = state.get("human_approved")
+    log = f"Human approval: {'approved' if approved else 'rejected'} by user"
+    return {"log": [log]}
 
 
 def execute_action_node(state: EmailAgentState) -> dict:
-    """PLACEHOLDER - real Gmail sending comes in Block 10."""
+    """
+    PARTIAL: deciding WHETHER to act is now real (based on the human's
+    decision), but actually calling the Gmail API to send the reply is
+    still a placeholder - real sending arrives in Block 10.
+    """
+    if state.get("human_approved"):
+        return {
+            "action_executed": False,
+            "log": ["Execute action: approved - would send now (real Gmail sending arrives in Block 10)"],
+        }
     return {
         "action_executed": False,
-        "log": ["Execute action: skipped (not implemented until Block 10)"],
+        "log": ["Execute action: skipped - human rejected the reply"],
     }
 
 

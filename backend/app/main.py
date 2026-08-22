@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.agent.checkpointer import close_checkpointer, init_checkpointer
 from app.api.auth import router as auth_router
 from app.api.emails import router as emails_router
 from app.api.health import router as health_router
@@ -29,8 +30,15 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     # Code before "yield" runs once when the server starts.
     logger.info("app_starting", environment=settings.ENVIRONMENT)
+
+    # Opens a persistent connection pool the agent uses to remember paused
+    # runs (e.g. "waiting for human approval") across server restarts.
+    app.state.agent_checkpointer = await init_checkpointer()
+
     yield
-    # Code after "yield" would run once when the server shuts down.
+
+    # Code after "yield" runs once when the server shuts down.
+    await close_checkpointer()
 
 
 app = FastAPI(

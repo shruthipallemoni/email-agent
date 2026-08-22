@@ -10,23 +10,25 @@ gets passed down to gmail_service - it needs this only to save a refreshed
 Google access token if the old one expired.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
+from app.api.dependencies import get_agent_checkpointer
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.agent import AgentRunResponse
 from app.schemas.analysis import EmailAnalysisResponse
+from app.schemas.approval import ApprovalDecisionRequest, PendingApprovalResponse
 from app.schemas.email import EmailDetail, EmailListResponse, ThreadResponse
-from app.schemas.reply import ReplyDraftResponse
+from app.schemas.reply import ReplyDraft, ReplyDraftResponse
 from app.schemas.validation import ValidatedReplyResponse
 from app.services import gmail_service
 from app.services.email_analysis_service import analyze_email
 from app.services.reply_generation_service import generate_reply
 from app.services.reply_validation_service import validate_reply
 from app.services.llm.factory import get_llm_provider
-from app.agent.graph import run_email_agent
+from app.agent.graph import get_agent_state, resume_email_agent, run_email_agent
 
 router = APIRouter()
 
@@ -95,27 +97,35 @@ async def run_agent_route(
     message_id: str,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    checkpointer=Depends(get_agent_checkpointer),
 ):
     """
-    Runs the full LangGraph agent workflow on one email: analyze it, decide
-    what (if anything) needs to happen, and record each step taken.
+    Runs the LangGraph agent workflow on one email: analyze it, decide what
+    (if anything) needs to happen, draft and validate a reply if needed,
+    then PAUSE and wait for a human to approve or reject it.
 
-    Right now most of the workflow after "analyze" is placeholder logic -
-    see app/agent/nodes.py for exactly which steps are real vs. stubbed,
-    and which future block implements each one for real.
+    If the email doesn't need a reply at all (e.g. a newsletter), the run
+    finishes completely in this one call - no approval needed.
+
+    See app/agent/nodes.py for exactly which steps are real vs. still
+    placeholders, and which future block implements each remaining one.
     """
     email = await gmail_service.get_email_detail(db, user, message_id)
     llm = get_llm_provider()
 
     final_state = await run_email_agent(
         llm,
+        checkpointer,
         message_id=email["id"],
         subject=email["subject"],
         sender=email["from_"],
         body_text=email["body_text"],
     )
 
+    status = "completed" if final_state.get("action_decision") == "no_action_needed" else "awaiting_approval"
+
     return AgentRunResponse(
+        status=status,
         message_id=final_state["message_id"],
         subject=final_state["subject"],
         sender=final_state["sender"],
@@ -200,4 +210,84 @@ async def generate_reply_route(
         from_=email["from_"],
         analysis=analysis,
         draft=draft,
+    )
+
+
+@router.get("/{message_id}/pending-approval", response_model=PendingApprovalResponse)
+async def get_pending_approval_route(
+    message_id: str,
+    user: User = Depends(get_current_user),
+    checkpointer=Depends(get_agent_checkpointer),
+):
+    """
+    Checks whether an email's agent run is currently paused, waiting for a
+    human decision - and if so, returns everything needed to show it in
+    the dashboard (the draft reply, its validation, etc).
+    """
+    llm = get_llm_provider()
+    values, next_nodes = await get_agent_state(llm, checkpointer, message_id)
+
+    if not values:
+        return PendingApprovalResponse(status="not_found", message_id=message_id)
+
+    status = "awaiting_approval" if "human_approval" in next_nodes else "completed"
+
+    return PendingApprovalResponse(
+        status=status,
+        message_id=message_id,
+        subject=values.get("subject"),
+        sender=values.get("sender"),
+        analysis=values.get("analysis"),
+        reply_draft=values.get("reply_draft"),
+        reply_validation=values.get("reply_validation"),
+    )
+
+
+@router.post("/{message_id}/approve", response_model=AgentRunResponse)
+async def approve_reply_route(
+    message_id: str,
+    decision: ApprovalDecisionRequest,
+    user: User = Depends(get_current_user),
+    checkpointer=Depends(get_agent_checkpointer),
+):
+    """
+    Submits a human's approve/reject decision for a paused agent run, and
+    resumes it. Optionally, the human can edit the draft's subject/body
+    before approving - their edits are used instead of the AI's original
+    draft for the rest of the run.
+    """
+    llm = get_llm_provider()
+    values, next_nodes = await get_agent_state(llm, checkpointer, message_id)
+
+    if not values or "human_approval" not in next_nodes:
+        raise HTTPException(
+            status_code=404,
+            detail="No pending approval found for this email. It may already have been "
+            "approved/rejected, or the agent hasn't been run on it yet.",
+        )
+
+    edited_draft = None
+    if decision.edited_subject is not None or decision.edited_body is not None:
+        current_draft: ReplyDraft = values["reply_draft"]
+        edited_draft = ReplyDraft(
+            subject=decision.edited_subject or current_draft.subject,
+            body=decision.edited_body or current_draft.body,
+            notes=current_draft.notes,
+        )
+
+    final_state = await resume_email_agent(
+        llm, checkpointer, message_id, approved=decision.approved, edited_draft=edited_draft
+    )
+
+    return AgentRunResponse(
+        status="completed",
+        message_id=final_state["message_id"],
+        subject=final_state["subject"],
+        sender=final_state["sender"],
+        analysis=final_state.get("analysis"),
+        action_decision=final_state.get("action_decision"),
+        reply_draft=final_state.get("reply_draft"),
+        reply_validation=final_state.get("reply_validation"),
+        human_approval_required=final_state.get("human_approval_required"),
+        log=final_state.get("log", []),
     )
