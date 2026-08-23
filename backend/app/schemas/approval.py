@@ -20,6 +20,20 @@ class ApprovalDecisionRequest(BaseModel):
     edited_subject: Optional[str] = None
     edited_body: Optional[str] = None
 
+    model_config = {
+        # Without this, FastAPI's interactive docs (/docs) show "string" as
+        # the example value for these optional fields, which is easy to
+        # mistake for a real edit - leaving it in the request body would
+        # overwrite the AI's actual draft with the literal text "string".
+        # This example makes the docs show null instead, which is correct
+        # when you don't want to edit anything.
+        "json_schema_extra": {
+            "examples": [
+                {"approved": True, "edited_subject": None, "edited_body": None}
+            ]
+        }
+    }
+
 
 class PendingApprovalResponse(BaseModel):
     status: Literal["awaiting_approval", "completed", "not_found"]

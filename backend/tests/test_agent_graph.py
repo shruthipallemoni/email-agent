@@ -234,7 +234,10 @@ async def test_get_agent_state_reports_completed_after_resume():
     values, next_nodes = await get_agent_state(llm, checkpointer, "msg-7")
 
     assert next_nodes == ()
-    assert values["action_executed"] is False  # placeholder until Block 10 sends for real
+    # execute_action_node no longer sets this on approval as of Block 10 -
+    # the real send (and its result) is reported separately by the API
+    # route (see AgentRunResponse.sent), not written back into agent state.
+    assert "action_executed" not in values or values.get("action_executed") is not True
 
 
 @pytest.mark.asyncio

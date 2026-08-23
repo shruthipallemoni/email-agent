@@ -31,7 +31,8 @@ oauth.register(
     client_kwargs={
         "scope": (
             "openid email profile "
-            "https://www.googleapis.com/auth/gmail.readonly"
+            "https://www.googleapis.com/auth/gmail.readonly "
+            "https://www.googleapis.com/auth/gmail.send"
         ),
         # Asking for a refresh token so we can access Gmail later without
         # the user having to log in again every hour.

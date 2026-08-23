@@ -11,6 +11,7 @@ Quick concepts explained:
 """
 
 import base64
+from email.mime.text import MIMEText
 from typing import Any, Optional
 
 import httpx
@@ -47,18 +48,25 @@ async def _refresh_access_token(refresh_token: str) -> str:
     return response.json()["access_token"]
 
 
-async def _gmail_get(db: Session, path: str, user: User, params: Optional[dict] = None) -> dict:
+async def _gmail_request(
+    db: Session,
+    method: str,
+    path: str,
+    user: User,
+    params: Optional[dict] = None,
+    json_body: Optional[dict] = None,
+) -> dict:
     """
-    Makes a GET request to the Gmail API using the user's access token.
-    If the token has expired (Gmail replies with 401), we automatically
-    refresh it once and retry - so the user doesn't notice or get logged out
-    just because an hour passed.
+    Makes a request (GET or POST) to the Gmail API using the user's access
+    token. If the token has expired (Gmail replies with 401), we
+    automatically refresh it once and retry - so the user doesn't notice or
+    get logged out just because an hour passed.
     """
     url = f"{GMAIL_API_BASE}{path}"
     headers = {"Authorization": f"Bearer {user.google_access_token}"}
 
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=headers, params=params)
+        response = await client.request(method, url, headers=headers, params=params, json=json_body)
 
         if response.status_code == 401:
             if not user.google_refresh_token:
@@ -70,15 +78,23 @@ async def _gmail_get(db: Session, path: str, user: User, params: Optional[dict] 
             update_access_token(db, user.email, new_token)
             user.google_access_token = new_token  # use the fresh token for the retry below
             headers = {"Authorization": f"Bearer {new_token}"}
-            response = await client.get(url, headers=headers, params=params)
+            response = await client.request(method, url, headers=headers, params=params, json=json_body)
 
-    if response.status_code != 200:
+    if response.status_code not in (200, 201):
         raise HTTPException(
             status_code=502,
             detail=f"Gmail API error ({response.status_code}): {response.text}",
         )
 
     return response.json()
+
+
+async def _gmail_get(db: Session, path: str, user: User, params: Optional[dict] = None) -> dict:
+    return await _gmail_request(db, "GET", path, user, params=params)
+
+
+async def _gmail_post(db: Session, path: str, user: User, json_body: dict) -> dict:
+    return await _gmail_request(db, "POST", path, user, json_body=json_body)
 
 
 def _get_header(headers: list[dict], name: str) -> str:
@@ -145,6 +161,10 @@ def parse_message_detail(message: dict) -> dict:
         "date": _get_header(headers, "Date"),
         "snippet": message.get("snippet", ""),
         "body_text": _extract_plain_text_body(payload),
+        # The RFC822 "Message-ID" header (different from Gmail's own id
+        # field above) - needed so a reply threads correctly in the
+        # recipient's inbox. See send_reply() below.
+        "message_id_header": _get_header(headers, "Message-ID") or None,
     }
 
 
@@ -186,3 +206,58 @@ async def get_thread(db: Session, user: User, thread_id: str) -> list[dict]:
     """Fetches every message in a thread (an email + all its replies)."""
     thread_data = await _gmail_get(db, f"/threads/{thread_id}", user, params={"format": "full"})
     return [parse_message_detail(message) for message in thread_data.get("messages", [])]
+
+
+def _build_reply_raw_message(
+    sender: str, to: str, subject: str, body: str, in_reply_to: Optional[str]
+) -> str:
+    """
+    Builds a raw email message (in the standard RFC 2822 email format) and
+    encodes it the way Gmail's API requires (base64url).
+
+    The "In-Reply-To" and "References" headers are what makes email clients
+    (Gmail, Outlook, etc.) group this message into the same conversation as
+    the original, instead of showing it as an unrelated new email.
+    """
+    message = MIMEText(body)
+    message["To"] = to
+    message["From"] = sender
+    message["Subject"] = subject
+    if in_reply_to:
+        message["In-Reply-To"] = in_reply_to
+        message["References"] = in_reply_to
+
+    raw_bytes = message.as_bytes()
+    return base64.urlsafe_b64encode(raw_bytes).decode("utf-8")
+
+
+async def send_reply(db: Session, user: User, original_email: dict, draft) -> dict:
+    """
+    Sends an approved reply through Gmail, correctly threaded as a reply to
+    the original email.
+
+    `original_email` is the dict returned by get_email_detail() - we need
+    it to know who to send to, which thread to attach the reply to, and
+    which message we're replying to (for proper email threading headers).
+    `draft` is a ReplyDraft (the subject/body a human has approved).
+
+    IMPORTANT: this function performs the actual, real, irreversible action
+    of sending an email. Per the project's security principles, it must
+    only ever be called AFTER a human has explicitly approved the reply -
+    see approve_reply_route() in app/api/emails.py, the only place this
+    function is called from.
+    """
+    raw_message = _build_reply_raw_message(
+        sender=user.email,
+        to=original_email["from_"],
+        subject=draft.subject,
+        body=draft.body,
+        in_reply_to=original_email.get("message_id_header"),
+    )
+
+    return await _gmail_post(
+        db,
+        "/messages/send",
+        user,
+        json_body={"raw": raw_message, "threadId": original_email["thread_id"]},
+    )

@@ -3,13 +3,12 @@ Individual steps ("nodes") the LangGraph agent can take while processing an
 email. Each node is a small function: it reads the current state, does one
 job, and returns just the piece of state it changed.
 
-One placeholder remains for now:
-- Block 10 will implement execute_action_node's actual Gmail-sending call
+One placeholder remains:
 - Block 13 will implement retrieve_context_node for real (RAG)
 
-Nothing about the graph's shape needs to change when that happens - only
-the inside of these functions does. That's the point of building the
-skeleton first.
+Every other step is now real, including sending the approved reply -
+though the actual Gmail API call for that lives in app/api/emails.py, not
+in execute_action_node itself. See that function's docstring for why.
 """
 
 from app.agent.state import EmailAgentState
@@ -148,14 +147,16 @@ def human_approval_node(state: EmailAgentState) -> dict:
 
 def execute_action_node(state: EmailAgentState) -> dict:
     """
-    PARTIAL: deciding WHETHER to act is now real (based on the human's
-    decision), but actually calling the Gmail API to send the reply is
-    still a placeholder - real sending arrives in Block 10.
+    Confirms whether the reply is cleared to send, based on the human's
+    decision. The actual Gmail API call happens right after the graph
+    finishes (see approve_reply_route() in app/api/emails.py) - not inside
+    this node - which keeps the agent's "thinking" layer decoupled from
+    Gmail-specific mechanics (the same separation used for reading email
+    back in Block 3).
     """
     if state.get("human_approved"):
         return {
-            "action_executed": False,
-            "log": ["Execute action: approved - would send now (real Gmail sending arrives in Block 10)"],
+            "log": ["Execute action: approved - cleared to send via Gmail"],
         }
     return {
         "action_executed": False,

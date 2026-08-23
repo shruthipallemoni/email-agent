@@ -2,6 +2,8 @@
 Defines the exact "shape" of email data our API sends to the frontend.
 """
 
+from typing import Optional
+
 from pydantic import BaseModel
 
 
@@ -23,6 +25,7 @@ class EmailDetail(BaseModel):
     date: str
     snippet: str
     body_text: str
+    message_id_header: Optional[str] = None
 
 
 class EmailListResponse(BaseModel):

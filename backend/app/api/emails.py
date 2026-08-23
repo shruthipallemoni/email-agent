@@ -17,7 +17,7 @@ from app.api.auth import get_current_user
 from app.api.dependencies import get_agent_checkpointer
 from app.core.database import get_db
 from app.models.user import User
-from app.schemas.agent import AgentRunResponse
+from app.schemas.agent import AgentRunResponse, SentMessageInfo
 from app.schemas.analysis import EmailAnalysisResponse
 from app.schemas.approval import ApprovalDecisionRequest, PendingApprovalResponse
 from app.schemas.email import EmailDetail, EmailListResponse, ThreadResponse
@@ -249,12 +249,17 @@ async def approve_reply_route(
     decision: ApprovalDecisionRequest,
     user: User = Depends(get_current_user),
     checkpointer=Depends(get_agent_checkpointer),
+    db: Session = Depends(get_db),
 ):
     """
     Submits a human's approve/reject decision for a paused agent run, and
     resumes it. Optionally, the human can edit the draft's subject/body
     before approving - their edits are used instead of the AI's original
     draft for the rest of the run.
+
+    If approved, this is the ONLY place in the whole app that actually
+    sends an email through Gmail - matching the project's security
+    principle that sensitive actions require explicit human approval first.
     """
     llm = get_llm_provider()
     values, next_nodes = await get_agent_state(llm, checkpointer, message_id)
@@ -279,6 +284,24 @@ async def approve_reply_route(
         llm, checkpointer, message_id, approved=decision.approved, edited_draft=edited_draft
     )
 
+    sent_info = None
+    if decision.approved and final_state.get("action_decision") == "needs_further_processing":
+        validation = final_state.get("reply_validation")
+        if validation and not validation.passed:
+            final_state["log"].append(
+                f"Note: reply failed automated validation (severity={validation.severity}) "
+                "but was approved by human override."
+            )
+
+        original_email = await gmail_service.get_email_detail(db, user, message_id)
+        send_result = await gmail_service.send_reply(
+            db, user, original_email, final_state["reply_draft"]
+        )
+        sent_info = SentMessageInfo(
+            gmail_message_id=send_result["id"], thread_id=send_result["threadId"]
+        )
+        final_state["log"].append(f"Sent via Gmail (message id: {send_result['id']})")
+
     return AgentRunResponse(
         status="completed",
         message_id=final_state["message_id"],
@@ -289,5 +312,6 @@ async def approve_reply_route(
         reply_draft=final_state.get("reply_draft"),
         reply_validation=final_state.get("reply_validation"),
         human_approval_required=final_state.get("human_approval_required"),
+        sent=sent_info,
         log=final_state.get("log", []),
     )
