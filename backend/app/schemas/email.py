@@ -25,6 +25,7 @@ class EmailDetail(BaseModel):
     date: str
     snippet: str
     body_text: str
+    body_html: Optional[str] = None
     message_id_header: Optional[str] = None
 
 

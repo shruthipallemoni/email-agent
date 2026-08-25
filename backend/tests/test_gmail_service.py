@@ -17,8 +17,12 @@ from app.main import app
 from app.schemas.reply import ReplyDraft
 from app.services.gmail_service import (
     _build_reply_raw_message,
+    _collect_inline_images,
     _decode_base64url,
+    _extract_html_body,
     _extract_plain_text_body,
+    _html_to_text,
+    _sanitize_email_html,
     parse_message_detail,
     parse_message_summary,
     send_reply,
@@ -66,6 +70,39 @@ def test_extract_plain_text_prefers_text_plain_part():
     body = _extract_plain_text_body(FAKE_MESSAGE["payload"])
     assert body == "Hey, can we move tomorrow's meeting to Friday?"
     assert "<p>" not in body  # confirms it picked plain text, not the html part
+
+
+def test_html_to_text_decodes_entities():
+    html = "<p>You&#39;re receiving this because you signed up.</p>"
+    assert _html_to_text(html) == "You're receiving this because you signed up."
+
+
+def test_html_to_text_converts_links_to_readable_form():
+    html = '<p>Check our <a href="https://example.com/offer">latest offer</a> today.</p>'
+    result = _html_to_text(html)
+    assert "latest offer (https://example.com/offer)" in result
+    assert "<a href" not in result
+
+
+def test_html_to_text_handles_bare_url_links_without_duplicating():
+    html = '<a href="https://example.com">https://example.com</a>'
+    assert _html_to_text(html) == "https://example.com"
+
+
+def test_html_to_text_ignores_mailto_and_anchor_links():
+    html = '<p>Contact <a href="mailto:test@example.com">us</a> or <a href="#top">back to top</a>.</p>'
+    result = _html_to_text(html)
+    assert "mailto:" not in result
+    assert "us" in result
+
+
+def test_extract_plain_text_falls_back_to_readable_html_when_no_plain_part():
+    payload = {
+        "mimeType": "text/html",
+        "body": {"data": _b64("<p>Hi &amp; welcome! <a href=\"https://x.com\">Click here</a></p>")},
+    }
+    result = _extract_plain_text_body(payload)
+    assert result == "Hi & welcome! Click here (https://x.com)"
 
 
 def test_parse_message_summary():
@@ -195,3 +232,108 @@ async def test_send_reply_calls_gmail_send_endpoint_with_correct_payload():
     sent_json_body = call_args.kwargs["json_body"]
     assert sent_json_body["threadId"] == "thread456"
     assert "raw" in sent_json_body
+
+
+# --- Block 12 fix: rendering the real HTML email (clickable links, images) ---
+
+from app.services.gmail_service import _resolve_inline_images  # noqa: E402
+
+
+def test_sanitize_email_html_strips_scripts_and_event_handlers():
+    dangerous = (
+        '<p>Hello</p><script>alert(1)</script>'
+        '<img src=x onerror="alert(1)">'
+        '<a href="javascript:alert(1)">click</a>'
+        '<iframe src="evil.com"></iframe>'
+    )
+    clean = _sanitize_email_html(dangerous)
+    assert "script" not in clean
+    assert "onerror" not in clean
+    assert "javascript:" not in clean
+    assert "iframe" not in clean
+    assert "<p>Hello</p>" in clean
+
+
+def test_sanitize_email_html_keeps_safe_links_images_and_styling():
+    html = (
+        '<p style="color:red">Hi <a href="https://example.com">link</a></p>'
+        '<img src="https://example.com/pic.png" alt="pic">'
+    )
+    clean = _sanitize_email_html(html)
+    assert 'href="https://example.com"' in clean
+    assert 'img src="https://example.com/pic.png"' in clean
+    assert "color:red" in clean
+
+
+def test_sanitize_email_html_blocks_risky_css_properties():
+    html = '<p style="color:red;position:fixed;top:0;">Overlay</p>'
+    clean = _sanitize_email_html(html)
+    assert "color:red" in clean
+    assert "position" not in clean
+
+
+def test_extract_html_body_finds_the_html_part():
+    payload = {
+        "mimeType": "multipart/alternative",
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": _b64("plain version")}},
+            {"mimeType": "text/html", "body": {"data": _b64("<p>html version</p>")}},
+        ],
+    }
+    assert _extract_html_body(payload) == "<p>html version</p>"
+
+
+def test_extract_html_body_returns_none_when_no_html_part():
+    payload = {"mimeType": "text/plain", "body": {"data": _b64("just text")}}
+    assert _extract_html_body(payload) is None
+
+
+def test_collect_inline_images_finds_content_id_images():
+    payload = {
+        "mimeType": "multipart/related",
+        "parts": [
+            {"mimeType": "text/html", "body": {"data": _b64('<img src="cid:logo123">')}},
+            {
+                "mimeType": "image/png",
+                "headers": [{"name": "Content-ID", "value": "<logo123>"}],
+                "body": {"attachmentId": "att-1"},
+            },
+        ],
+    }
+    images = _collect_inline_images(payload)
+    assert images == {"logo123": ("att-1", "image/png")}
+
+
+@pytest.mark.asyncio
+async def test_resolve_inline_images_replaces_cid_with_data_uri():
+    html = '<p>Logo: <img src="cid:logo123"></p>'
+    inline_images = {"logo123": ("att-1", "image/png")}
+
+    fake_bytes = b"PNGDATA"
+    fake_get = AsyncMock(return_value={"data": base64.urlsafe_b64encode(fake_bytes).decode()})
+
+    with patch("app.services.gmail_service._gmail_get", fake_get):
+        resolved = await _resolve_inline_images(
+            db=None, user=_FakeUser(), message_id="msg1", html=html, inline_images=inline_images
+        )
+
+    assert "cid:logo123" not in resolved
+    assert "data:image/png;base64," in resolved
+
+
+@pytest.mark.asyncio
+async def test_resolve_inline_images_skips_image_that_fails_to_load():
+    """A broken/missing attachment shouldn't take down the whole email render."""
+    from fastapi import HTTPException
+
+    html = '<p>Logo: <img src="cid:logo123"></p>'
+    inline_images = {"logo123": ("att-1", "image/png")}
+
+    fake_get = AsyncMock(side_effect=HTTPException(status_code=502, detail="gone"))
+
+    with patch("app.services.gmail_service._gmail_get", fake_get):
+        resolved = await _resolve_inline_images(
+            db=None, user=_FakeUser(), message_id="msg1", html=html, inline_images=inline_images
+        )
+
+    assert resolved == html  # left untouched rather than raising

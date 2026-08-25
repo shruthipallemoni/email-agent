@@ -1,150 +1,110 @@
 import { useEffect, useState } from "react";
+import { api, ApiError } from "./api/client";
+import { EmailDetailPanel } from "./components/EmailDetailPanel";
+import { EmailList } from "./components/EmailList";
+import { Header } from "./components/Header";
+import { LoginScreen } from "./components/LoginScreen";
+import type { CurrentUser, EmailSummary } from "./types";
 
-// This is a very simple first page - just enough to prove login and Gmail
-// reading both work. The real dashboard gets built in Block 11.
-
-const API_BASE = "http://localhost:8000/api";
-
-type HealthResponse = {
-  status: string;
-  app_name: string;
-  environment: string;
-};
-
-type CurrentUser = {
-  email: string;
-  name: string;
-  picture: string | null;
-};
-
-type LoginStatus = {
-  authenticated: boolean;
-  user: CurrentUser | null;
-};
-
-type EmailSummary = {
-  id: string;
-  thread_id: string;
-  subject: string;
-  from_: string;
-  date: string;
-  snippet: string;
-};
+type AuthPhase = "checking" | "signed_out" | "signed_in";
 
 function App() {
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [authStatus, setAuthStatus] = useState<LoginStatus | null>(null);
+  const [authPhase, setAuthPhase] = useState<AuthPhase>("checking");
+  const [user, setUser] = useState<CurrentUser | null>(null);
 
-  const [emails, setEmails] = useState<EmailSummary[] | null>(null);
+  const [emails, setEmails] = useState<EmailSummary[]>([]);
   const [emailsLoading, setEmailsLoading] = useState(false);
   const [emailsError, setEmailsError] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // On mobile, selecting an email pushes to a detail view; this tracks that.
+  const [mobileShowDetail, setMobileShowDetail] = useState(false);
 
   useEffect(() => {
-    fetch(`${API_BASE}/health`)
-      .then((res) => res.json())
-      .then((data) => setHealth(data))
-      .catch(() => setError("Could not reach the backend. Is it running?"));
-
-    // "credentials: include" is required so the browser sends our login
-    // cookie along with this request.
-    fetch(`${API_BASE}/auth/me`, { credentials: "include" })
-      .then((res) => res.json())
-      .then((data) => setAuthStatus(data))
-      .catch(() => setAuthStatus({ authenticated: false, user: null }));
+    api
+      .getMe()
+      .then((status) => {
+        if (status.authenticated && status.user) {
+          setUser(status.user);
+          setAuthPhase("signed_in");
+        } else {
+          setAuthPhase("signed_out");
+        }
+      })
+      .catch(() => setAuthPhase("signed_out"));
   }, []);
 
-  const handleLogin = () => {
-    window.location.href = `${API_BASE}/auth/login`;
-  };
+  useEffect(() => {
+    if (authPhase !== "signed_in") return;
 
-  const handleLogout = async () => {
-    await fetch(`${API_BASE}/auth/logout`, { method: "POST", credentials: "include" });
-    setAuthStatus({ authenticated: false, user: null });
-    setEmails(null);
-  };
-
-  const loadEmails = async () => {
     setEmailsLoading(true);
-    setEmailsError(null);
-    try {
-      const res = await fetch(`${API_BASE}/emails?max_results=10`, { credentials: "include" });
-      if (!res.ok) {
-        throw new Error(`Server responded with ${res.status}`);
-      }
-      const data = await res.json();
-      setEmails(data.emails);
-    } catch (err) {
-      setEmailsError("Could not load emails. Try logging in again.");
-    } finally {
-      setEmailsLoading(false);
-    }
-  };
+    api
+      .listEmails()
+      .then((res) => setEmails(res.emails))
+      .catch((err) => setEmailsError(err instanceof ApiError ? err.message : "Couldn't load your inbox."))
+      .finally(() => setEmailsLoading(false));
+  }, [authPhase]);
+
+  async function handleLogout() {
+    await api.logout();
+    setUser(null);
+    setAuthPhase("signed_out");
+  }
+
+  function handleSelect(id: string) {
+    setSelectedId(id);
+    setMobileShowDetail(true);
+  }
+
+  if (authPhase === "checking") {
+    return <div className="flex min-h-screen items-center justify-center text-sm text-ink/40">Loading…</div>;
+  }
+
+  if (authPhase === "signed_out" || !user) {
+    return <LoginScreen loginUrl={api.loginUrl()} />;
+  }
 
   return (
-    <div className="min-h-screen flex items-start justify-center bg-gray-50 py-10">
-      <div className="bg-white shadow-md rounded-lg p-8 max-w-xl w-full">
-        <h1 className="text-2xl font-semibold text-gray-800 mb-4 text-center">
-          AI Email & Productivity Agent
-        </h1>
+    <div className="flex h-screen flex-col">
+      <Header user={user} onLogout={handleLogout} />
 
-        {health && (
-          <p className="text-green-600 mb-4 text-center">
-            ✅ Connected to backend ({health.app_name} - {health.environment})
-          </p>
-        )}
-        {error && <p className="text-red-600 mb-4 text-center">❌ {error}</p>}
-
-        <div className="text-center mb-6">
-          {authStatus?.authenticated && authStatus.user ? (
-            <div>
-              <p className="text-gray-700 mb-2">
-                Logged in as <span className="font-medium">{authStatus.user.name}</span> (
-                {authStatus.user.email})
-              </p>
-              <div className="flex gap-2 justify-center">
-                <button
-                  onClick={loadEmails}
-                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-                >
-                  {emailsLoading ? "Loading..." : "Load recent emails"}
-                </button>
-                <button
-                  onClick={handleLogout}
-                  className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
-                >
-                  Log out
-                </button>
-              </div>
-            </div>
+      <div className="flex min-h-0 flex-1">
+        {/* Inbox list - hidden on mobile once a detail view is open */}
+        <div
+          className={`w-full shrink-0 overflow-y-auto border-r border-ink/10 sm:block sm:w-80 ${
+            mobileShowDetail ? "hidden" : "block"
+          }`}
+        >
+          {emailsError ? (
+            <div className="p-6 text-sm text-rust">{emailsError}</div>
           ) : (
-            <button
-              onClick={handleLogin}
-              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-            >
-              Log in with Google
-            </button>
+            <EmailList
+              emails={emails}
+              selectedId={selectedId}
+              onSelect={handleSelect}
+              loading={emailsLoading}
+            />
           )}
         </div>
 
-        {emailsError && <p className="text-red-600 text-center mb-4">❌ {emailsError}</p>}
-
-        {emails && (
-          <ul className="divide-y divide-gray-200 border rounded">
-            {emails.map((email) => (
-              <li key={email.id} className="p-3">
-                <p className="font-medium text-gray-800">{email.subject}</p>
-                <p className="text-sm text-gray-500">
-                  {email.from_} — {email.date}
-                </p>
-                <p className="text-sm text-gray-600 mt-1">{email.snippet}</p>
-              </li>
-            ))}
-            {emails.length === 0 && (
-              <li className="p-3 text-gray-500 text-center">No emails found.</li>
-            )}
-          </ul>
-        )}
+        {/* Detail panel */}
+        <div className={`min-h-0 flex-1 overflow-y-auto ${mobileShowDetail ? "block" : "hidden"} sm:block`}>
+          {selectedId ? (
+            <>
+              <button
+                onClick={() => setMobileShowDetail(false)}
+                className="m-4 text-sm text-ink/50 hover:text-ink sm:hidden"
+              >
+                ← Back to inbox
+              </button>
+              <EmailDetailPanel key={selectedId} emailId={selectedId} />
+            </>
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm text-ink/40">
+              Select an email to get started.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

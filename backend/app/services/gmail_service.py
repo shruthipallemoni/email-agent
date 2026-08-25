@@ -11,8 +11,12 @@ Quick concepts explained:
 """
 
 import base64
+import re
 from email.mime.text import MIMEText
+from html.parser import HTMLParser
 from typing import Any, Optional
+
+import nh3
 
 import httpx
 from fastapi import HTTPException
@@ -115,7 +119,8 @@ def _extract_plain_text_body(payload: dict) -> str:
     """
     Emails can be structured many ways (plain text, HTML, multipart with
     attachments...). This walks the structure looking for a plain-text part.
-    If none exists, it falls back to an empty string rather than crashing.
+    If none exists, it falls back to converting the HTML part to readable
+    text (see _html_to_text) rather than crashing.
     """
     mime_type = payload.get("mimeType", "")
 
@@ -127,12 +132,68 @@ def _extract_plain_text_body(payload: dict) -> str:
         if text:
             return text
 
-    # No plain text part found anywhere - fall back to raw HTML if present,
-    # so we return something rather than nothing.
+    # No plain text part found anywhere - fall back to the HTML part,
+    # converted to readable text (not the raw markup) - see _html_to_text.
     if mime_type == "text/html" and payload.get("body", {}).get("data"):
-        return _decode_base64url(payload["body"]["data"])
+        raw_html = _decode_base64url(payload["body"]["data"])
+        return _html_to_text(raw_html)
 
     return ""
+
+
+class _HTMLToTextParser(HTMLParser):
+    """
+    A minimal HTML-to-text converter using only Python's standard library
+    (no extra dependency needed). It's not a full browser-grade renderer,
+    but it correctly handles the two things that matter most for reading
+    an email: turning links into readable "text (url)" form, and decoding
+    HTML entities (e.g. "&#39;" -> "'") instead of showing them raw.
+    """
+
+    _BLOCK_TAGS = {"p", "div", "br", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        self._link_href: Optional[str] = None
+        self._link_text_start: int = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if tag == "a":
+            href = dict(attrs).get("href")
+            if href and not href.startswith(("mailto:", "#")):
+                self._link_href = href
+                self._link_text_start = len(self._chunks)
+        elif tag in self._BLOCK_TAGS:
+            self._chunks.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._link_href:
+            link_text = "".join(self._chunks[self._link_text_start :]).strip()
+            del self._chunks[self._link_text_start :]
+            if link_text and link_text != self._link_href:
+                self._chunks.append(f"{link_text} ({self._link_href})")
+            else:
+                self._chunks.append(self._link_href)
+            self._link_href = None
+        elif tag in self._BLOCK_TAGS:
+            self._chunks.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self._chunks.append(data)
+
+    def get_text(self) -> str:
+        text = "".join(self._chunks)
+        # Collapse runs of blank lines/spaces left behind by stripped tags.
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n[ \t]*\n[ \t]*(\n[ \t]*)+", "\n\n", text)
+        return text.strip()
+
+
+def _html_to_text(html: str) -> str:
+    parser = _HTMLToTextParser()
+    parser.feed(html)
+    return parser.get_text()
 
 
 def parse_message_summary(message: dict) -> dict:
@@ -148,6 +209,120 @@ def parse_message_summary(message: dict) -> dict:
     }
 
 
+def _extract_html_body(payload: dict) -> Optional[str]:
+    """Walks the message structure looking for the HTML version of the body, if any."""
+    mime_type = payload.get("mimeType", "")
+
+    if mime_type == "text/html" and payload.get("body", {}).get("data"):
+        return _decode_base64url(payload["body"]["data"])
+
+    for part in payload.get("parts", []) or []:
+        html = _extract_html_body(part)
+        if html:
+            return html
+
+    return None
+
+
+def _collect_inline_images(payload: dict) -> dict[str, tuple[str, str]]:
+    """
+    Finds images embedded IN the email itself (not linked externally) -
+    common in signatures and some newsletters. These show up in the HTML
+    as <img src="cid:some-id">, and the actual image bytes live in a
+    separate attachment part identified by a matching "Content-ID" header.
+    Returns {content_id: (attachment_id, mime_type)}.
+    """
+    images: dict[str, tuple[str, str]] = {}
+    mime_type = payload.get("mimeType", "")
+
+    if mime_type.startswith("image/"):
+        content_id = _get_header(payload.get("headers", []), "Content-ID")
+        attachment_id = payload.get("body", {}).get("attachmentId")
+        if content_id and attachment_id:
+            images[content_id.strip("<>")] = (attachment_id, mime_type)
+
+    for part in payload.get("parts", []) or []:
+        images.update(_collect_inline_images(part))
+
+    return images
+
+
+async def _resolve_inline_images(
+    db: Session, user: User, message_id: str, html: str, inline_images: dict[str, tuple[str, str]]
+) -> str:
+    """
+    Replaces "cid:xxxx" image references in the HTML with the actual image
+    data (as a data: URI), by fetching each attachment from Gmail. Skips
+    any image that fails to load rather than breaking the whole email.
+    """
+    for content_id, (attachment_id, mime_type) in inline_images.items():
+        marker = f"cid:{content_id}"
+        if marker not in html:
+            continue
+        try:
+            attachment = await _gmail_get(
+                db, f"/messages/{message_id}/attachments/{attachment_id}", user
+            )
+        except HTTPException:
+            continue
+
+        raw_bytes = _decode_base64url_bytes(attachment["data"])
+        data_uri = f"data:{mime_type};base64,{base64.b64encode(raw_bytes).decode('utf-8')}"
+        html = html.replace(marker, data_uri)
+
+    return html
+
+
+def _decode_base64url_bytes(data: str) -> bytes:
+    """Same idea as _decode_base64url, but returns raw bytes (for images) instead of text."""
+    padded = data + "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(padded)
+
+
+# Tags/attributes allowed through the sanitizer - covers normal email
+# formatting (links, images, basic layout, inline colors/spacing) while
+# blocking anything that could run code or hijack the page (<script>,
+# event handlers like onclick, <iframe>, forms, etc.)
+_ALLOWED_TAGS = {
+    "a", "p", "br", "div", "span", "b", "strong", "i", "em", "u",
+    "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+    "blockquote", "hr", "img", "table", "thead", "tbody", "tr", "td", "th", "font",
+}
+_ALLOWED_ATTRIBUTES = {
+    "a": {"href", "title"},
+    "img": {"src", "alt", "width", "height"},
+    "font": {"color", "size", "face"},
+    "*": {"style"},
+}
+# Only these CSS properties survive in any inline "style" attribute -
+# blocks layout-breaking or tracking-adjacent properties (position,
+# behavior, background-image url() tracking, etc.) while keeping the
+# basic formatting real emails rely on.
+_ALLOWED_STYLE_PROPERTIES = {
+    "color", "background-color", "font-size", "font-weight", "font-style",
+    "text-align", "text-decoration", "padding", "margin", "line-height",
+    "border", "border-radius", "width", "max-width", "display",
+}
+
+
+def _sanitize_email_html(html: str) -> str:
+    """
+    Strips anything from the email's HTML that could be dangerous to
+    render in the browser (scripts, event handlers, iframes, forms...)
+    while keeping normal formatting, links, and images intact. This is
+    IMPORTANT - email HTML comes from strangers on the internet and must
+    never be trusted enough to render as-is.
+    """
+    return nh3.clean(
+        html,
+        tags=_ALLOWED_TAGS,
+        attributes=_ALLOWED_ATTRIBUTES,
+        filter_style_properties=_ALLOWED_STYLE_PROPERTIES,
+        url_schemes={"http", "https", "mailto", "data"},
+        link_rel="noopener noreferrer nofollow",
+    )
+
+
 def parse_message_detail(message: dict) -> dict:
     """Turns Gmail's raw message JSON into the full detail view of one email."""
     payload = message.get("payload", {})
@@ -161,6 +336,10 @@ def parse_message_detail(message: dict) -> dict:
         "date": _get_header(headers, "Date"),
         "snippet": message.get("snippet", ""),
         "body_text": _extract_plain_text_body(payload),
+        # Filled in properly by get_email_detail() below (it needs to make
+        # extra API calls to resolve embedded images) - defaults to None
+        # here so get_thread() callers don't break without it.
+        "body_html": None,
         # The RFC822 "Message-ID" header (different from Gmail's own id
         # field above) - needed so a reply threads correctly in the
         # recipient's inbox. See send_reply() below.
@@ -172,11 +351,17 @@ async def list_recent_emails(
     db: Session, user: User, max_results: int = 10, query: str = ""
 ) -> list[dict]:
     """
-    Fetches the most recent emails. Gmail's list endpoint only returns IDs,
-    so we then fetch each message's details (in 'metadata' format, which is
-    fast and gives us headers/snippet without downloading the full body).
+    Fetches the most recent INBOX emails. Gmail's list endpoint only
+    returns IDs, so we then fetch each message's details (in 'metadata'
+    format, which is fast and gives us headers/snippet without downloading
+    the full body).
+
+    Filtered to the INBOX label by default - without this, Gmail's API
+    returns ALL mail matching the query, including messages YOU sent,
+    which would otherwise show up looking like new mail waiting on the
+    agent to review.
     """
-    list_params: dict[str, Any] = {"maxResults": max_results}
+    list_params: dict[str, Any] = {"maxResults": max_results, "labelIds": ["INBOX"]}
     if query:
         list_params["q"] = query
 
@@ -197,9 +382,23 @@ async def list_recent_emails(
 
 
 async def get_email_detail(db: Session, user: User, message_id: str) -> dict:
-    """Fetches one email in full, including its body text."""
+    """
+    Fetches one email in full, including a safe-to-render HTML version of
+    the body (with embedded images resolved and anything dangerous
+    stripped out) alongside the plain-text version used for AI analysis.
+    """
     message = await _gmail_get(db, f"/messages/{message_id}", user, params={"format": "full"})
-    return parse_message_detail(message)
+    detail = parse_message_detail(message)
+
+    payload = message.get("payload", {})
+    raw_html = _extract_html_body(payload)
+    if raw_html:
+        inline_images = _collect_inline_images(payload)
+        if inline_images:
+            raw_html = await _resolve_inline_images(db, user, message_id, raw_html, inline_images)
+        detail["body_html"] = _sanitize_email_html(raw_html)
+
+    return detail
 
 
 async def get_thread(db: Session, user: User, thread_id: str) -> list[dict]:

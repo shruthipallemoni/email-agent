@@ -18,6 +18,7 @@ from app.agent.checkpointer import close_checkpointer, init_checkpointer
 from app.api.auth import router as auth_router
 from app.api.emails import router as emails_router
 from app.api.health import router as health_router
+from app.services.observability import init_observability
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 
@@ -30,6 +31,10 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     # Code before "yield" runs once when the server starts.
     logger.info("app_starting", environment=settings.ENVIRONMENT)
+
+    # Sets up Langfuse tracing if configured (see app/services/observability.py) -
+    # does nothing if no Langfuse keys are set in .env.
+    init_observability()
 
     # Opens a persistent connection pool the agent uses to remember paused
     # runs (e.g. "waiting for human approval") across server restarts.

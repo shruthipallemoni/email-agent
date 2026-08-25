@@ -21,6 +21,7 @@ from app.schemas.analysis import EmailAnalysis
 from app.schemas.reply import ReplyDraft
 from app.services.llm.base import LLMProvider
 from app.services.llm.json_utils import strip_code_fences
+from app.services.observability import trace_llm_call
 
 SYSTEM_PROMPT = """You are an email reply-drafting assistant. Your job is \
 to write a DRAFT reply to the email provided below, for a human to review \
@@ -81,7 +82,11 @@ async def generate_reply(
     analysis: EmailAnalysis,
 ) -> ReplyDraft:
     user_prompt = _build_user_prompt(subject, sender, body_text, analysis)
-    raw_response = await llm.complete(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
+
+    with trace_llm_call("generate_reply", llm.model_name, SYSTEM_PROMPT, user_prompt) as generation:
+        raw_response = await llm.complete(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
+        if generation:
+            generation.update(output=raw_response)
 
     try:
         data = json.loads(strip_code_fences(raw_response))

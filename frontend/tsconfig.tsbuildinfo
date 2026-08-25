@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/api/client.ts","./src/components/agenttrail.tsx","./src/components/emaildetailpanel.tsx","./src/components/emaillist.tsx","./src/components/header.tsx","./src/components/loginscreen.tsx","./src/components/statuschip.tsx"],"version":"5.9.3"}

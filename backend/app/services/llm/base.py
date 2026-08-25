@@ -15,6 +15,12 @@ from abc import ABC, abstractmethod
 
 
 class LLMProvider(ABC):
+    # Every provider sets this to its actual model string (e.g.
+    # "claude-sonnet-4-5") - used for logging/tracing so it's clear which
+    # model produced a given response. Defaults to "unknown" so nothing
+    # breaks for providers (like test fakes) that don't set it.
+    model_name: str = "unknown"
+
     @abstractmethod
     async def complete(self, system_prompt: str, user_prompt: str) -> str:
         """

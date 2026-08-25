@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
 
+    # --- Observability settings (Block 12) ---
+    # Optional: if left blank, the app runs exactly the same, just without
+    # tracing. Get free keys at https://cloud.langfuse.com (see README).
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_BASE_URL: str = "https://cloud.langfuse.com"
+
     # This tells pydantic-settings to also look inside a file named ".env"
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

@@ -23,6 +23,7 @@ from fastapi import HTTPException
 from app.schemas.analysis import EmailAnalysis
 from app.services.llm.base import LLMProvider
 from app.services.llm.json_utils import strip_code_fences
+from app.services.observability import trace_llm_call
 
 SYSTEM_PROMPT = """You are an email classification assistant. Your only job \
 is to analyze the email provided below and output a structured JSON \
@@ -69,7 +70,11 @@ async def analyze_email(
     llm: LLMProvider, subject: str, sender: str, body_text: str
 ) -> EmailAnalysis:
     user_prompt = _build_user_prompt(subject, sender, body_text)
-    raw_response = await llm.complete(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
+
+    with trace_llm_call("analyze_email", llm.model_name, SYSTEM_PROMPT, user_prompt) as generation:
+        raw_response = await llm.complete(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
+        if generation:
+            generation.update(output=raw_response)
 
     try:
         data = json.loads(strip_code_fences(raw_response))

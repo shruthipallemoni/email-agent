@@ -1,3 +1,41 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+body {
+  @apply bg-paper text-ink font-body antialiased;
+}
+
+/* Keyboard focus should always be visible - accessibility floor. */
+:focus-visible {
+  outline: 2px solid theme("colors.signal");
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Styling for sanitized email HTML rendered via dangerouslySetInnerHTML
+   (see EmailDetailPanel.tsx) - the email's own inline styles survive
+   sanitization, these are just sensible defaults/overrides. */
+.email-body a {
+  color: theme("colors.mist");
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.email-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.25rem;
+}
+.email-body table {
+  max-width: 100%;
+  border-collapse: collapse;
+}
+.email-body p {
+  margin-bottom: 0.75rem;
+}
