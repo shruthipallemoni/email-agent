@@ -13,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
 from app.main import app
+from app.models.user import User
 
 TEST_DATABASE_URL = "sqlite:///:memory:"
 
@@ -22,6 +23,15 @@ test_engine = create_engine(
     poolclass=StaticPool,  # keeps the same in-memory database across connections
 )
 TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+# Only tables listed here get created in the SQLite test database. This is
+# deliberately a whitelist, not "all of Base.metadata" - Block 13 added a
+# `Vector` column (from pgvector) to document_chunks, and that column type
+# only exists in real PostgreSQL, not SQLite. Tests involving RAG/knowledge
+# base features use mocks instead (see test_knowledge_service.py) rather
+# than a real database - only a live Postgres+pgvector instance can
+# actually exercise that table.
+_SQLITE_COMPATIBLE_TABLES = [User.__table__]
 
 
 def _override_get_db():
@@ -35,10 +45,10 @@ def _override_get_db():
 @pytest.fixture(autouse=True)
 def setup_test_database():
     """Runs before/after every test: creates fresh tables, then drops them."""
-    Base.metadata.create_all(bind=test_engine)
+    Base.metadata.create_all(bind=test_engine, tables=_SQLITE_COMPATIBLE_TABLES)
     app.dependency_overrides[get_db] = _override_get_db
     yield
-    Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.drop_all(bind=test_engine, tables=_SQLITE_COMPATIBLE_TABLES)
     app.dependency_overrides.clear()
 
 

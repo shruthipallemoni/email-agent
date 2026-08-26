@@ -27,5 +27,6 @@ class AgentRunResponse(BaseModel):
     reply_draft: Optional[ReplyDraft] = None
     reply_validation: Optional[ReplyValidation] = None
     human_approval_required: Optional[bool] = None
+    retrieved_context: List[str] = []
     sent: Optional[SentMessageInfo] = None
     log: List[str] = []

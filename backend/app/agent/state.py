@@ -28,6 +28,7 @@ class EmailAgentState(TypedDict, total=False):
     reply_draft: Optional[ReplyDraft]
     reply_validated: bool
     reply_validation: Optional[ReplyValidation]
+    retrieved_context: List[str]
     human_approval_required: bool
     human_approved: Optional[bool]
     action_executed: bool

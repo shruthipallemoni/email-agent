@@ -30,16 +30,18 @@ be passed in explicitly, rather than creating a throwaway one internally
 from typing import Optional
 
 from langgraph.graph import END, StateGraph
+from sqlalchemy.orm import Session
 
 from app.agent import nodes
 from app.agent.state import EmailAgentState
+from app.models.user import User
 from app.schemas.analysis import EmailAnalysis
 from app.schemas.reply import ReplyDraft
 from app.schemas.validation import ReplyValidation
 from app.services.llm.base import LLMProvider
 
 
-def build_email_agent_graph(llm: LLMProvider, checkpointer):
+def build_email_agent_graph(llm: LLMProvider, checkpointer, db: Session, user: User):
     """Assembles the graph. Cheap to call repeatedly - no I/O happens here."""
     graph = StateGraph(EmailAgentState)
 
@@ -115,6 +117,8 @@ def _coerce_state_models(values: dict) -> dict:
 async def run_email_agent(
     llm: LLMProvider,
     checkpointer,
+    db: Session,
+    user: User,
     message_id: str,
     subject: str,
     sender: str,
@@ -126,7 +130,7 @@ async def run_email_agent(
     that pause point - call resume_email_agent() later to continue it. If
     no reply is needed at all, the run finishes completely in this one call.
     """
-    compiled_graph = build_email_agent_graph(llm, checkpointer)
+    compiled_graph = build_email_agent_graph(llm, checkpointer, db, user)
     initial_state = _initial_state(message_id, subject, sender, body_text)
     return await compiled_graph.ainvoke(initial_state, config=_thread_config(message_id))
 
@@ -134,6 +138,8 @@ async def run_email_agent(
 async def resume_email_agent(
     llm: LLMProvider,
     checkpointer,
+    db: Session,
+    user: User,
     message_id: str,
     approved: bool,
     edited_draft: Optional[ReplyDraft] = None,
@@ -148,7 +154,7 @@ async def resume_email_agent(
     human-in-the-loop workflow should let people fix small things rather
     than only choosing yes/no.
     """
-    compiled_graph = build_email_agent_graph(llm, checkpointer)
+    compiled_graph = build_email_agent_graph(llm, checkpointer, db, user)
     config = _thread_config(message_id)
 
     update_values: dict = {"human_approved": approved}
@@ -161,7 +167,9 @@ async def resume_email_agent(
     return await compiled_graph.ainvoke(None, config=config)
 
 
-async def get_agent_state(llm: LLMProvider, checkpointer, message_id: str) -> tuple[dict, tuple]:
+async def get_agent_state(
+    llm: LLMProvider, checkpointer, db: Session, user: User, message_id: str
+) -> tuple[dict, tuple]:
     """
     Reads back the current state of a run (paused or finished) WITHOUT
     running anything - used to show a pending approval in the dashboard.
@@ -172,6 +180,6 @@ async def get_agent_state(llm: LLMProvider, checkpointer, message_id: str) -> tu
     - next_nodes: which node(s) would run next. Empty if the run finished
       (or never started); contains "human_approval" if it's paused there.
     """
-    compiled_graph = build_email_agent_graph(llm, checkpointer)
+    compiled_graph = build_email_agent_graph(llm, checkpointer, db, user)
     snapshot = await compiled_graph.aget_state(_thread_config(message_id))
     return _coerce_state_models(snapshot.values), snapshot.next

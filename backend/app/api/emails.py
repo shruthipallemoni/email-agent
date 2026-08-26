@@ -116,6 +116,8 @@ async def run_agent_route(
     final_state = await run_email_agent(
         llm,
         checkpointer,
+        db,
+        user,
         message_id=email["id"],
         subject=email["subject"],
         sender=email["from_"],
@@ -133,6 +135,7 @@ async def run_agent_route(
         action_decision=final_state.get("action_decision"),
         reply_draft=final_state.get("reply_draft"),
         reply_validation=final_state.get("reply_validation"),
+        retrieved_context=final_state.get("retrieved_context") or [],
         human_approval_required=final_state.get("human_approval_required"),
         log=final_state.get("log", []),
     )
@@ -218,6 +221,7 @@ async def get_pending_approval_route(
     message_id: str,
     user: User = Depends(get_current_user),
     checkpointer=Depends(get_agent_checkpointer),
+    db: Session = Depends(get_db),
 ):
     """
     Checks whether an email's agent run is currently paused, waiting for a
@@ -225,7 +229,7 @@ async def get_pending_approval_route(
     the dashboard (the draft reply, its validation, etc).
     """
     llm = get_llm_provider()
-    values, next_nodes = await get_agent_state(llm, checkpointer, message_id)
+    values, next_nodes = await get_agent_state(llm, checkpointer, db, user, message_id)
 
     if not values:
         return PendingApprovalResponse(status="not_found", message_id=message_id)
@@ -262,7 +266,7 @@ async def approve_reply_route(
     principle that sensitive actions require explicit human approval first.
     """
     llm = get_llm_provider()
-    values, next_nodes = await get_agent_state(llm, checkpointer, message_id)
+    values, next_nodes = await get_agent_state(llm, checkpointer, db, user, message_id)
 
     if not values or "human_approval" not in next_nodes:
         raise HTTPException(
@@ -281,7 +285,7 @@ async def approve_reply_route(
         )
 
     final_state = await resume_email_agent(
-        llm, checkpointer, message_id, approved=decision.approved, edited_draft=edited_draft
+        llm, checkpointer, db, user, message_id, approved=decision.approved, edited_draft=edited_draft
     )
 
     sent_info = None
@@ -312,6 +316,7 @@ async def approve_reply_route(
         reply_draft=final_state.get("reply_draft"),
         reply_validation=final_state.get("reply_validation"),
         human_approval_required=final_state.get("human_approval_required"),
+        retrieved_context=final_state.get("retrieved_context") or [],
         sent=sent_info,
         log=final_state.get("log", []),
     )

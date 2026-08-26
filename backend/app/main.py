@@ -18,6 +18,7 @@ from app.agent.checkpointer import close_checkpointer, init_checkpointer
 from app.api.auth import router as auth_router
 from app.api.emails import router as emails_router
 from app.api.health import router as health_router
+from app.api.knowledge import router as knowledge_router
 from app.services.observability import init_observability
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
@@ -72,6 +73,7 @@ app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
 app.include_router(health_router, prefix="/api", tags=["health"])
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(emails_router, prefix="/api/emails", tags=["emails"])
+app.include_router(knowledge_router, prefix="/api/knowledge", tags=["knowledge"])
 
 
 @app.get("/")

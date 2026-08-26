@@ -133,3 +133,36 @@ async def test_email_body_is_clearly_delimited_in_user_prompt():
     assert "--- EMAIL START ---" in llm.last_user_prompt
     assert "--- EMAIL END ---" in llm.last_user_prompt
     assert malicious_body in llm.last_user_prompt
+
+
+@pytest.mark.asyncio
+async def test_retrieved_context_is_included_when_provided():
+    llm = FakeLLMProvider(canned_response=VALID_REPLY_JSON)
+    await generate_reply(
+        llm, subject="Test", sender="a@b.com", body_text="text", analysis=SAMPLE_ANALYSIS,
+        retrieved_context=["Our office WiFi password is Sunshine123.", "Support hours are 9-5 EST."],
+    )
+    assert "Our office WiFi password is Sunshine123." in llm.last_user_prompt
+    assert "Support hours are 9-5 EST." in llm.last_user_prompt
+    assert "YOUR KNOWLEDGE BASE" in llm.last_user_prompt
+
+
+@pytest.mark.asyncio
+async def test_no_knowledge_base_section_when_no_context_retrieved():
+    llm = FakeLLMProvider(canned_response=VALID_REPLY_JSON)
+    await generate_reply(
+        llm, subject="Test", sender="a@b.com", body_text="text", analysis=SAMPLE_ANALYSIS,
+        retrieved_context=[],
+    )
+    assert "YOUR KNOWLEDGE BASE" not in llm.last_user_prompt
+
+
+@pytest.mark.asyncio
+async def test_knowledge_base_is_labeled_as_reference_not_instructions():
+    """Same prompt-injection defense principle applied to the user's own documents."""
+    llm = FakeLLMProvider(canned_response=VALID_REPLY_JSON)
+    await generate_reply(
+        llm, subject="Test", sender="a@b.com", body_text="text", analysis=SAMPLE_ANALYSIS,
+        retrieved_context=["Some note."],
+    )
+    assert "not instructions" in llm.last_user_prompt.lower()

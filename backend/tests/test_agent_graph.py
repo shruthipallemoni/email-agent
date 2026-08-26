@@ -1,6 +1,6 @@
 """
-Tests for Block 6 (LangGraph agent) and Block 9 (human-in-the-loop
-approval).
+Tests for Block 6 (LangGraph agent), Block 9 (human-in-the-loop approval),
+and Block 13's wiring of RAG into the graph.
 
 We use a fake LLM provider (same idea as test_email_analysis.py) so these
 tests run instantly, need no API key, and let us precisely control what
@@ -8,9 +8,16 @@ the "AI" decides. For the checkpointer, tests use LangGraph's in-memory
 MemorySaver rather than the real PostgreSQL one (app/agent/checkpointer.py)
 - no database needed to run these tests, and MemorySaver supports the same
 pause/resume behavior we're testing.
+
+Since Block 13, the graph's retrieve_context step needs a database and
+user to search the knowledge base - these tests aren't testing RAG search
+itself (see test_knowledge_service.py for that), so `search_similar_chunks`
+is patched to return an empty list, and `db`/`user` are just placeholders
+that are never actually touched.
 """
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -18,6 +25,17 @@ from langgraph.checkpoint.memory import MemorySaver
 from app.agent.graph import get_agent_state, resume_email_agent, run_email_agent
 from app.schemas.reply import ReplyDraft
 from app.services.llm.base import LLMProvider
+
+
+@pytest.fixture(autouse=True)
+def no_knowledge_base_results():
+    """These tests aren't about RAG search - keep it a no-op here."""
+    with patch("app.agent.nodes.search_similar_chunks", AsyncMock(return_value=[])):
+        yield
+
+
+DB = None  # never actually touched - search_similar_chunks is patched above
+USER = None
 
 
 class FakeLLMProvider(LLMProvider):
@@ -84,7 +102,7 @@ async def test_agent_takes_shortcut_when_no_response_needed():
     checkpointer = MemorySaver()
 
     final_state = await run_email_agent(
-        llm, checkpointer,
+        llm, checkpointer, DB, USER,
         message_id="msg-1", subject="Weekly Newsletter",
         sender="news@example.com", body_text="Here's what happened this week...",
     )
@@ -110,7 +128,7 @@ async def test_agent_pauses_before_human_approval_when_response_needed():
     checkpointer = MemorySaver()
 
     final_state = await run_email_agent(
-        llm, checkpointer,
+        llm, checkpointer, DB, USER,
         message_id="msg-2", subject="Can we reschedule?",
         sender="boss@company.com", body_text="Can we move tomorrow's meeting to Friday?",
     )
@@ -121,6 +139,7 @@ async def test_agent_pauses_before_human_approval_when_response_needed():
     assert final_state["human_approval_required"] is True
 
     log_text = " ".join(final_state["log"])
+    assert "Retrieve context" in log_text
     assert "Generate reply" in log_text
     assert "Validate reply" in log_text
     # These steps come AFTER the pause point - they must NOT have run yet.
@@ -137,12 +156,12 @@ async def test_resume_after_approval_completes_the_run():
     checkpointer = MemorySaver()
 
     await run_email_agent(
-        llm, checkpointer,
+        llm, checkpointer, DB, USER,
         message_id="msg-3", subject="Can we reschedule?",
         sender="boss@company.com", body_text="Can we move tomorrow's meeting to Friday?",
     )
 
-    final_state = await resume_email_agent(llm, checkpointer, "msg-3", approved=True)
+    final_state = await resume_email_agent(llm, checkpointer, DB, USER, "msg-3", approved=True)
 
     assert final_state["human_approved"] is True
     log_text = " ".join(final_state["log"])
@@ -159,12 +178,12 @@ async def test_resume_after_rejection_skips_execution():
     checkpointer = MemorySaver()
 
     await run_email_agent(
-        llm, checkpointer,
+        llm, checkpointer, DB, USER,
         message_id="msg-4", subject="Can we reschedule?",
         sender="boss@company.com", body_text="text",
     )
 
-    final_state = await resume_email_agent(llm, checkpointer, "msg-4", approved=False)
+    final_state = await resume_email_agent(llm, checkpointer, DB, USER, "msg-4", approved=False)
 
     log_text = " ".join(final_state["log"])
     assert "Human approval: rejected" in log_text
@@ -180,7 +199,7 @@ async def test_resume_with_edited_draft_uses_the_edited_text():
     checkpointer = MemorySaver()
 
     await run_email_agent(
-        llm, checkpointer,
+        llm, checkpointer, DB, USER,
         message_id="msg-5", subject="Can we reschedule?",
         sender="boss@company.com", body_text="text",
     )
@@ -191,7 +210,7 @@ async def test_resume_with_edited_draft_uses_the_edited_text():
         notes="original notes",
     )
     final_state = await resume_email_agent(
-        llm, checkpointer, "msg-5", approved=True, edited_draft=edited
+        llm, checkpointer, DB, USER, "msg-5", approved=True, edited_draft=edited
     )
 
     assert final_state["reply_draft"].subject == "Re: Can we reschedule? (edited)"
@@ -206,12 +225,12 @@ async def test_get_agent_state_reports_awaiting_approval_while_paused():
     checkpointer = MemorySaver()
 
     await run_email_agent(
-        llm, checkpointer,
+        llm, checkpointer, DB, USER,
         message_id="msg-6", subject="Can we reschedule?",
         sender="boss@company.com", body_text="text",
     )
 
-    values, next_nodes = await get_agent_state(llm, checkpointer, "msg-6")
+    values, next_nodes = await get_agent_state(llm, checkpointer, DB, USER, "msg-6")
 
     assert "human_approval" in next_nodes
     assert values["reply_draft"].subject == "Re: Can we reschedule?"
@@ -225,13 +244,13 @@ async def test_get_agent_state_reports_completed_after_resume():
     checkpointer = MemorySaver()
 
     await run_email_agent(
-        llm, checkpointer,
+        llm, checkpointer, DB, USER,
         message_id="msg-7", subject="Test",
         sender="a@b.com", body_text="text",
     )
-    await resume_email_agent(llm, checkpointer, "msg-7", approved=True)
+    await resume_email_agent(llm, checkpointer, DB, USER, "msg-7", approved=True)
 
-    values, next_nodes = await get_agent_state(llm, checkpointer, "msg-7")
+    values, next_nodes = await get_agent_state(llm, checkpointer, DB, USER, "msg-7")
 
     assert next_nodes == ()
     # execute_action_node no longer sets this on approval as of Block 10 -
@@ -245,7 +264,7 @@ async def test_get_agent_state_returns_empty_for_unknown_message():
     llm = FakeLLMProvider(_analysis_json(requires_response=False))
     checkpointer = MemorySaver()
 
-    values, next_nodes = await get_agent_state(llm, checkpointer, "never-run-id")
+    values, next_nodes = await get_agent_state(llm, checkpointer, DB, USER, "never-run-id")
 
     assert values == {}
     assert next_nodes == ()
@@ -258,7 +277,7 @@ async def test_agent_state_carries_original_email_fields_through():
     checkpointer = MemorySaver()
 
     final_state = await run_email_agent(
-        llm, checkpointer,
+        llm, checkpointer, DB, USER,
         message_id="msg-8", subject="Test Subject",
         sender="someone@example.com", body_text="Test body",
     )
@@ -281,13 +300,33 @@ async def test_agent_log_grows_across_the_full_run_including_resume():
     checkpointer = MemorySaver()
 
     await run_email_agent(
-        llm, checkpointer,
+        llm, checkpointer, DB, USER,
         message_id="msg-9", subject="Test",
         sender="a@b.com", body_text="text",
     )
-    final_state = await resume_email_agent(llm, checkpointer, "msg-9", approved=True)
+    final_state = await resume_email_agent(llm, checkpointer, DB, USER, "msg-9", approved=True)
 
     # analyze_email, determine_action, retrieve_context, generate_reply,
     # validate_reply, determine_approval, human_approval, execute_action,
     # store_result = 9 steps, each logging at least one entry.
     assert len(final_state["log"]) >= 9
+
+
+@pytest.mark.asyncio
+async def test_retrieved_context_flows_into_final_state_when_knowledge_base_has_results():
+    """When the knowledge base DOES have something relevant, it should show up in the final state."""
+    fake_chunk = type("FakeChunk", (), {"content": "Our office WiFi password is on the wall."})()
+    with patch("app.agent.nodes.search_similar_chunks", AsyncMock(return_value=[fake_chunk])):
+        llm = FakeLLMProvider([
+            _analysis_json(requires_response=True), _reply_json(), _validation_json(passed=True),
+        ])
+        checkpointer = MemorySaver()
+
+        final_state = await run_email_agent(
+            llm, checkpointer, DB, USER,
+            message_id="msg-10", subject="What's the wifi password?",
+            sender="guest@example.com", body_text="Can you send the wifi password?",
+        )
+
+    assert final_state["retrieved_context"] == ["Our office WiFi password is on the wall."]
+    assert "found 1 relevant chunk" in " ".join(final_state["log"])
